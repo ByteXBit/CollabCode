@@ -1,9 +1,11 @@
 import { Editor } from "@monaco-editor/react"
 import { MonacoBinding } from "y-monaco"
-import { useRef, useState, useEffect, useMemo } from "react"
+import { useRef, useState, useEffect, useMemo, useCallback } from "react"
 import * as Y from "yjs"
 import { SocketIOProvider } from "y-socket.io"
 import { useParams, useNavigate } from "react-router-dom"
+import CursorManager, { getColorForUsername } from "../components/CursorManager.jsx"
+import ChatPanel from "../components/ChatPanel.jsx"
 
 function Room() {
   const { roomId } = useParams()
@@ -18,12 +20,17 @@ function Room() {
 
   const [users, setUsers] = useState([])
   const [copied, setCopied] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [editorReady, setEditorReady] = useState(null)
+  const [providerReady, setProviderReady] = useState(null)
 
   const ydoc = useMemo(() => new Y.Doc(), [])
   const ytext = useMemo(() => ydoc.getText("monaco"), [ydoc])
 
   const handleEditorMount = (editor) => {
     editorRef.current = editor
+    setEditorReady(editor)
 
     new MonacoBinding(
       ytext,
@@ -39,9 +46,13 @@ function Room() {
       autoConnect: true,
     })
     providerRef.current = provider
+    setProviderReady(provider)
+
+    const color = getColorForUsername(username)
 
     provider.awareness.setLocalStateField("user", {
       username,
+      color,
     })
 
     const updateUsers = () => {
@@ -91,6 +102,19 @@ function Room() {
     setUsername("")
     navigate("/")
   }
+
+  const handleToggleChat = () => {
+    setChatOpen((prev) => !prev)
+    if (!chatOpen) {
+      setUnreadCount(0) // Clear unread when opening
+    }
+  }
+
+  const handleNewMessage = useCallback(() => {
+    if (!chatOpen) {
+      setUnreadCount((prev) => prev + 1)
+    }
+  }, [chatOpen])
 
   // Username entry screen
   if (!username) {
@@ -177,7 +201,10 @@ function Room() {
                 key={index}
                 className="flex items-center gap-2 px-3 py-2 bg-gray-800 text-white rounded-lg text-sm"
               >
-                <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+                <span
+                  className="w-2 h-2 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: user.color || "#22c55e" }}
+                ></span>
                 {user.username}
                 {user.username === username && (
                   <span className="text-gray-500 text-xs ml-auto">(you)</span>
@@ -197,7 +224,23 @@ function Room() {
             theme="vs-dark"
             onMount={handleEditorMount}
           />
+          {/* CursorManager renders remote cursors as Monaco decorations — no visible DOM */}
+          <CursorManager
+            editor={editorReady}
+            provider={providerReady}
+            username={username}
+          />
         </section>
+
+        {/* Chat Panel */}
+        <ChatPanel
+          ydoc={ydoc}
+          username={username}
+          isOpen={chatOpen}
+          onToggle={handleToggleChat}
+          unreadCount={unreadCount}
+          onMessageReceived={handleNewMessage}
+        />
       </div>
     </main>
   )
