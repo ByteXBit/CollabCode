@@ -10,6 +10,7 @@ function Room() {
   const navigate = useNavigate()
 
   const editorRef = useRef(null)
+  const providerRef = useRef(null)
 
   const [username, setUsername] = useState(() => {
     return localStorage.getItem("collabcode_username") || ""
@@ -37,6 +38,7 @@ function Room() {
     const provider = new SocketIOProvider("/", roomId, ydoc, {
       autoConnect: true,
     })
+    providerRef.current = provider
 
     provider.awareness.setLocalStateField("user", {
       username,
@@ -78,6 +80,16 @@ function Room() {
     navigator.clipboard.writeText(window.location.href)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleExitRoom = () => {
+    if (providerRef.current) {
+      providerRef.current.awareness.setLocalStateField("user", null)
+      providerRef.current.disconnect()
+    }
+    localStorage.removeItem("collabcode_username")
+    setUsername("")
+    navigate("/")
   }
 
   // Username entry screen
@@ -142,6 +154,13 @@ function Room() {
           <span className="text-gray-400 text-sm">
             👤 {username}
           </span>
+          <button
+            onClick={handleExitRoom}
+            className="px-4 py-1.5 rounded-md bg-red-600/80 hover:bg-red-500 
+                       text-sm text-white transition-colors cursor-pointer"
+          >
+            Exit Room
+          </button>
         </div>
       </header>
 
