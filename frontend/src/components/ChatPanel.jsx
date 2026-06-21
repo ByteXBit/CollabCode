@@ -32,17 +32,21 @@ function ChatPanel({ ydoc, username, isOpen, onToggle, unreadCount, onMessageRec
     updateMessages()
 
     // Listen for changes (new messages from any user)
-    ymessages.observe((event) => {
+    // We use a named function so observe/unobserve use the same reference
+    const handleObserve = (event) => {
       updateMessages()
 
-      // Notify parent about new messages from other users
-      if (event.changes.added.size > 0 && onMessageReceived) {
+      // Only count remote messages for the unread badge
+      // event.transaction.local is true when WE sent the message
+      if (event.changes.added.size > 0 && !event.transaction.local && onMessageReceived) {
         onMessageReceived()
       }
-    })
+    }
+
+    ymessages.observe(handleObserve)
 
     return () => {
-      ymessages.unobserve(updateMessages)
+      ymessages.unobserve(handleObserve)
     }
   }, [ymessages, onMessageReceived])
 

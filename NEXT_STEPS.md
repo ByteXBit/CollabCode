@@ -25,7 +25,7 @@ By the end of all phases, your app will look like this:
 │          │  > Process exited (0)        │                   │
 │ [▶ Run]  │                              │                   │
 └──────────┴──────────────────────────────┴───────────────────┘
-```
+```n
 
 ### Tech Stack After All Phases
 

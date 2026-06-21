@@ -1,21 +1,22 @@
+/**
+ * useCursorAwareness — A custom hook that handles remote cursor rendering.
+ * 
+ * This is a hook (not a component) so it doesn't cause re-renders.
+ * It directly talks to the Monaco editor and Yjs awareness.
+ * 
+ * What it does:
+ * 1. Broadcasts YOUR cursor position to other users via awareness
+ * 2. Listens for OTHER users' cursor positions
+ * 3. Renders colored cursor bars + username labels in the editor using Monaco decorations
+ */
+
 import { useEffect, useRef } from "react"
 
-// Predefined color palette for user cursors
 const CURSOR_COLORS = [
-  "#3b82f6", // blue
-  "#ef4444", // red
-  "#22c55e", // green
-  "#f59e0b", // amber
-  "#a855f7", // purple
-  "#ec4899", // pink
-  "#06b6d4", // cyan
-  "#f97316", // orange
+  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b",
+  "#a855f7", "#ec4899", "#06b6d4", "#f97316",
 ]
 
-/**
- * Picks a consistent color for a username by hashing it.
- * Same username always gets the same color.
- */
 function getColorForUsername(username) {
   let hash = 0
   for (let i = 0; i < username.length; i++) {
@@ -24,178 +25,84 @@ function getColorForUsername(username) {
   return CURSOR_COLORS[Math.abs(hash) % CURSOR_COLORS.length]
 }
 
-/**
- * CursorManager — Renders remote users' cursors and selections in the Monaco editor.
- *
- * How it works:
- * 1. When the local user moves their cursor, we update the Yjs awareness state
- * 2. When a remote user's awareness state changes, we render their cursor as a Monaco "decoration"
- * 3. Decorations are CSS-styled overlays that sit on top of the editor text
- *
- * Props:
- *   - editor: the Monaco editor instance
- *   - provider: the SocketIOProvider instance (has .awareness)
- *   - username: the local user's name (so we skip rendering our own remote cursor)
- */
-function CursorManager({ editor, provider, username }) {
-  const decorationsRef = useRef([])
-  const styleRef = useRef(null)
+function useCursorAwareness(editorRef, providerRef, username) {
+  const decorationIds = useRef([])
+  const styleElRef = useRef(null)
 
   useEffect(() => {
+    const editor = editorRef.current
+    const provider = providerRef.current
     if (!editor || !provider) return
 
-    // Create a <style> tag to inject cursor CSS dynamically
+    // Inject a <style> element for dynamic cursor CSS
     const styleEl = document.createElement("style")
     document.head.appendChild(styleEl)
-    styleRef.current = styleEl
+    styleElRef.current = styleEl
 
-    // Listen for local cursor movements → broadcast via awareness
-    const cursorDisposable = editor.onDidChangeCursorPosition((e) => {
-      const selection = editor.getSelection()
+    // 1. Broadcast local cursor position on every cursor move
+    const disposable = editor.onDidChangeCursorPosition((e) => {
+      const sel = editor.getSelection()
       provider.awareness.setLocalStateField("cursor", {
-        position: {
-          lineNumber: e.position.lineNumber,
-          column: e.position.column,
-        },
-        selection: selection
-          ? {
-              startLineNumber: selection.startLineNumber,
-              startColumn: selection.startColumn,
-              endLineNumber: selection.endLineNumber,
-              endColumn: selection.endColumn,
-            }
-          : null,
+        lineNumber: e.position.lineNumber,
+        column: e.position.column,
+        selStartLine: sel?.startLineNumber,
+        selStartCol: sel?.startColumn,
+        selEndLine: sel?.endLineNumber,
+        selEndCol: sel?.endColumn,
       })
     })
 
-    // Listen for remote cursor changes → render decorations
-    const handleAwarenessChange = () => {
-      const states = Array.from(provider.awareness.getStates().entries())
-      const localClientId = provider.awareness.clientID
+    // 2. Render remote cursors whenever awareness changes
+    const renderRemoteCursors = () => {
+      const myClientId = provider.awareness.clientID
+      const decorations = []
+      let css = ""
 
-      const newDecorations = []
-      let cssRules = ""
+      provider.awareness.getStates().forEach((state, clientId) => {
+        if (clientId === myClientId) return
+        if (!state.user?.username || !state.cursor) return
 
-      for (const [clientId, state] of states) {
-        // Skip our own cursor
-        if (clientId === localClientId) continue
-        if (!state.user || !state.user.username || !state.cursor) continue
+        const name = state.user.username
+        const color = state.user.color || getColorForUsername(name)
+        const c = state.cursor
+        const id = `rc-${clientId}`
 
-        const remoteUser = state.user.username
-        const color = getColorForUsername(remoteUser)
-        const cursor = state.cursor
-        const className = `remote-cursor-${clientId}`
-        const labelClassName = `remote-cursor-label-${clientId}`
+        // CSS: colored left-border as cursor + ::after pseudo-element for label
+        css += `.${id}{border-left:2px solid ${color}!important;}`
+        css += `.${id}-label::after{content:"${name}";background:${color};color:#fff;font-size:10px;font-weight:700;padding:1px 5px;border-radius:2px;position:relative;top:-1.2em;left:2px;pointer-events:none;white-space:nowrap;z-index:10;}`
 
-        // CSS for the cursor line (a thin colored bar)
-        cssRules += `
-          .${className} {
-            background: ${color} !important;
-            width: 2px !important;
-            margin-left: -1px;
-          }
-          .${labelClassName} {
-            background: ${color};
-            color: white;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 1px 6px;
-            border-radius: 3px 3px 3px 0;
-            position: relative;
-            top: -1.4em;
-            white-space: nowrap;
-            z-index: 100;
-          }
-        `
-
-        // Cursor decoration (the thin colored bar)
-        newDecorations.push({
-          range: {
-            startLineNumber: cursor.position.lineNumber,
-            startColumn: cursor.position.column,
-            endLineNumber: cursor.position.lineNumber,
-            endColumn: cursor.position.column,
-          },
-          options: {
-            className: className,
-            stickiness: 1, // NeverGrowsWhenTypingAtEdges
-          },
+        // The cursor bar: use a 1-char range so Monaco actually renders the className
+        const endCol = c.column + 1
+        decorations.push({
+          range: { startLineNumber: c.lineNumber, startColumn: c.column, endLineNumber: c.lineNumber, endColumn: endCol },
+          options: { className: `${id} ${id}-label`, stickiness: 1 }
         })
 
-        // Username label decoration (floating above the cursor)
-        newDecorations.push({
-          range: {
-            startLineNumber: cursor.position.lineNumber,
-            startColumn: cursor.position.column,
-            endLineNumber: cursor.position.lineNumber,
-            endColumn: cursor.position.column,
-          },
-          options: {
-            after: {
-              content: remoteUser,
-              inlineClassName: labelClassName,
-            },
-            stickiness: 1,
-          },
-        })
-
-        // Selection highlight (if the remote user has text selected)
-        if (
-          cursor.selection &&
-          (cursor.selection.startLineNumber !== cursor.selection.endLineNumber ||
-            cursor.selection.startColumn !== cursor.selection.endColumn)
-        ) {
-          const selClassName = `remote-selection-${clientId}`
-          cssRules += `
-            .${selClassName} {
-              background: ${color}33 !important;
-            }
-          `
-          newDecorations.push({
-            range: {
-              startLineNumber: cursor.selection.startLineNumber,
-              startColumn: cursor.selection.startColumn,
-              endLineNumber: cursor.selection.endLineNumber,
-              endColumn: cursor.selection.endColumn,
-            },
-            options: {
-              className: selClassName,
-              stickiness: 1,
-            },
+        // Selection highlight (if they have text selected)
+        if (c.selStartLine && (c.selStartLine !== c.selEndLine || c.selStartCol !== c.selEndCol)) {
+          css += `.${id}-sel{background:${color}22!important;}`
+          decorations.push({
+            range: { startLineNumber: c.selStartLine, startColumn: c.selStartCol, endLineNumber: c.selEndLine, endColumn: c.selEndCol },
+            options: { className: `${id}-sel`, stickiness: 1 }
           })
         }
-      }
+      })
 
-      // Update the injected CSS
-      styleEl.textContent = cssRules
-
-      // Apply decorations to the editor
-      // deltaDecorations: pass old decorations to remove, new ones to add
-      decorationsRef.current = editor.deltaDecorations(
-        decorationsRef.current,
-        newDecorations
-      )
+      styleEl.textContent = css
+      decorationIds.current = editor.deltaDecorations(decorationIds.current, decorations)
     }
 
-    provider.awareness.on("change", handleAwarenessChange)
-    // Initial render
-    handleAwarenessChange()
+    provider.awareness.on("change", renderRemoteCursors)
+    renderRemoteCursors()
 
     return () => {
-      cursorDisposable.dispose()
-      provider.awareness.off("change", handleAwarenessChange)
-      // Clean up decorations
-      editor.deltaDecorations(decorationsRef.current, [])
-      // Clean up injected styles
-      if (styleEl.parentNode) {
-        styleEl.parentNode.removeChild(styleEl)
-      }
+      disposable.dispose()
+      provider.awareness.off("change", renderRemoteCursors)
+      editor.deltaDecorations(decorationIds.current, [])
+      styleEl.remove()
     }
-  }, [editor, provider, username])
-
-  // This component doesn't render any DOM — it only manages Monaco decorations
-  return null
+  }, [editorRef, providerRef, username])
 }
 
 export { getColorForUsername }
-export default CursorManager
+export default useCursorAwareness

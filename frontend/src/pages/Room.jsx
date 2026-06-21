@@ -4,7 +4,7 @@ import { useRef, useState, useEffect, useMemo, useCallback } from "react"
 import * as Y from "yjs"
 import { SocketIOProvider } from "y-socket.io"
 import { useParams, useNavigate } from "react-router-dom"
-import CursorManager, { getColorForUsername } from "../components/CursorManager.jsx"
+import { getColorForUsername } from "../components/CursorManager.jsx"
 import ChatPanel from "../components/ChatPanel.jsx"
 
 function Room() {
@@ -22,15 +22,12 @@ function Room() {
   const [copied, setCopied] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
-  const [editorReady, setEditorReady] = useState(null)
-  const [providerReady, setProviderReady] = useState(null)
 
   const ydoc = useMemo(() => new Y.Doc(), [])
   const ytext = useMemo(() => ydoc.getText("monaco"), [ydoc])
 
   const handleEditorMount = (editor) => {
     editorRef.current = editor
-    setEditorReady(editor)
 
     new MonacoBinding(
       ytext,
@@ -46,7 +43,6 @@ function Room() {
       autoConnect: true,
     })
     providerRef.current = provider
-    setProviderReady(provider)
 
     const color = getColorForUsername(username)
 
@@ -55,6 +51,7 @@ function Room() {
       color,
     })
 
+    // --- User list updates ---
     const updateUsers = () => {
       const states = Array.from(provider.awareness.getStates().values())
       setUsers(
@@ -67,6 +64,69 @@ function Room() {
     updateUsers()
     provider.awareness.on("change", updateUsers)
 
+    // --- Remote cursor rendering ---
+    const editor = editorRef.current
+    let decorationIds = []
+    const styleEl = document.createElement("style")
+    document.head.appendChild(styleEl)
+
+    // Broadcast local cursor position
+    let cursorDisposable = null
+    if (editor) {
+      cursorDisposable = editor.onDidChangeCursorPosition((e) => {
+        const sel = editor.getSelection()
+        provider.awareness.setLocalStateField("cursor", {
+          lineNumber: e.position.lineNumber,
+          column: e.position.column,
+          selStartLine: sel?.startLineNumber,
+          selStartCol: sel?.startColumn,
+          selEndLine: sel?.endLineNumber,
+          selEndCol: sel?.endColumn,
+        })
+      })
+    }
+
+    // Render remote cursors
+    const renderCursors = () => {
+      if (!editor) return
+      const myId = provider.awareness.clientID
+      const decos = []
+      let css = ""
+
+      provider.awareness.getStates().forEach((state, clientId) => {
+        if (clientId === myId) return
+        if (!state.user?.username || !state.cursor) return
+
+        const name = state.user.username
+        const clr = state.user.color || getColorForUsername(name)
+        const c = state.cursor
+        const tag = `rc${clientId}`
+
+        css += `.${tag}{border-left:2px solid ${clr}!important;position:relative;}`
+        css += `.${tag}::after{content:"${name}";background:${clr};color:#fff;font-size:10px;font-weight:700;padding:1px 5px;border-radius:2px;position:absolute;top:-1.2em;left:2px;pointer-events:none;white-space:nowrap;z-index:10;}`
+
+        decos.push({
+          range: { startLineNumber: c.lineNumber, startColumn: c.column, endLineNumber: c.lineNumber, endColumn: c.column + 1 },
+          options: { className: tag, stickiness: 1 }
+        })
+
+        if (c.selStartLine && (c.selStartLine !== c.selEndLine || c.selStartCol !== c.selEndCol)) {
+          css += `.${tag}s{background:${clr}22!important;}`
+          decos.push({
+            range: { startLineNumber: c.selStartLine, startColumn: c.selStartCol, endLineNumber: c.selEndLine, endColumn: c.selEndCol },
+            options: { className: `${tag}s`, stickiness: 1 }
+          })
+        }
+      })
+
+      styleEl.textContent = css
+      decorationIds = editor.deltaDecorations(decorationIds, decos)
+    }
+
+    provider.awareness.on("change", renderCursors)
+    renderCursors()
+
+    // --- Cleanup ---
     function handleBeforeUnload() {
       provider.awareness.setLocalStateField("user", null)
     }
@@ -76,6 +136,10 @@ function Room() {
     return () => {
       provider.disconnect()
       window.removeEventListener("beforeunload", handleBeforeUnload)
+      if (cursorDisposable) cursorDisposable.dispose()
+      provider.awareness.off("change", renderCursors)
+      if (editor) editor.deltaDecorations(decorationIds, [])
+      styleEl.remove()
     }
   }, [username, roomId, ydoc])
 
@@ -106,7 +170,7 @@ function Room() {
   const handleToggleChat = () => {
     setChatOpen((prev) => !prev)
     if (!chatOpen) {
-      setUnreadCount(0) // Clear unread when opening
+      setUnreadCount(0)
     }
   }
 
@@ -223,12 +287,6 @@ function Room() {
             defaultValue="// Start coding here..."
             theme="vs-dark"
             onMount={handleEditorMount}
-          />
-          {/* CursorManager renders remote cursors as Monaco decorations — no visible DOM */}
-          <CursorManager
-            editor={editorReady}
-            provider={providerReady}
-            username={username}
           />
         </section>
 
