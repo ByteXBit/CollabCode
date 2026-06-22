@@ -6,6 +6,14 @@ import { SocketIOProvider } from "y-socket.io"
 import { useParams, useNavigate } from "react-router-dom"
 import { getColorForUsername } from "../components/CursorManager.jsx"
 import ChatPanel from "../components/ChatPanel.jsx"
+import OutputTerminal from "../components/OutputTerminal.jsx"
+
+const LANGUAGES = [
+  { id: "javascript", name: "JavaScript" },
+  { id: "python", name: "Python" },
+  { id: "c", name: "C" },
+  { id: "cpp", name: "C++" },
+]
 
 function Room() {
   const { roomId } = useParams()
@@ -22,22 +30,65 @@ function Room() {
   const [copied, setCopied] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
+  const [language, setLanguage] = useState("javascript")
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [output, setOutput] = useState("")
+  const [exitCode, setExitCode] = useState(null)
+  const [isRunning, setIsRunning] = useState(false)
+  const [stdinValue, setStdinValue] = useState("")
+  const monacoRef = useRef(null)
 
   const ydoc = useMemo(() => new Y.Doc(), [])
   const ytext = useMemo(() => ydoc.getText("monaco"), [ydoc])
+  const [editorMounted, setEditorMounted] = useState(false)
 
-  const handleEditorMount = (editor) => {
+  const handleEditorMount = (editor, monaco) => {
     editorRef.current = editor
+    monacoRef.current = monaco
+    setEditorMounted(true)
+  }
 
-    new MonacoBinding(
-      ytext,
-      editorRef.current.getModel(),
-      new Set([editorRef.current]),
-    )
+  const handleLanguageChange = (e) => {
+    const newLang = e.target.value
+    setLanguage(newLang)
+    // Update Monaco's syntax highlighting language
+    if (monacoRef.current && editorRef.current) {
+      const model = editorRef.current.getModel()
+      monacoRef.current.editor.setModelLanguage(model, newLang)
+    }
+  }
+
+  const handleRun = async () => {
+    if (!editorRef.current || isRunning) return
+    const code = editorRef.current.getValue()
+    if (!code.trim()) return
+
+    setIsRunning(true)
+    setTerminalOpen(true)
+    setOutput("")
+    setExitCode(null)
+
+    try {
+      const res = await fetch("/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language, code, stdin: stdinValue }),
+      })
+      const result = await res.json()
+      setOutput((result.stdout || "") + (result.stderr || ""))
+      setExitCode(result.exitCode)
+    } catch (err) {
+      setOutput(`Error: ${err.message}`)
+      setExitCode(1)
+    } finally {
+      setIsRunning(false)
+    }
   }
 
   useEffect(() => {
-    if (!username) return
+    if (!username || !editorMounted) return
+
+    const editor = editorRef.current
 
     const provider = new SocketIOProvider("/", roomId, ydoc, {
       autoConnect: true,
@@ -50,6 +101,14 @@ function Room() {
       username,
       color,
     })
+
+    // Create MonacoBinding WITH awareness (4th arg enables built-in cursor sync)
+    const binding = new MonacoBinding(
+      ytext,
+      editor.getModel(),
+      new Set([editor]),
+      provider.awareness
+    )
 
     // --- User list updates ---
     const updateUsers = () => {
@@ -64,68 +123,6 @@ function Room() {
     updateUsers()
     provider.awareness.on("change", updateUsers)
 
-    // --- Remote cursor rendering ---
-    const editor = editorRef.current
-    let decorationIds = []
-    const styleEl = document.createElement("style")
-    document.head.appendChild(styleEl)
-
-    // Broadcast local cursor position
-    let cursorDisposable = null
-    if (editor) {
-      cursorDisposable = editor.onDidChangeCursorPosition((e) => {
-        const sel = editor.getSelection()
-        provider.awareness.setLocalStateField("cursor", {
-          lineNumber: e.position.lineNumber,
-          column: e.position.column,
-          selStartLine: sel?.startLineNumber,
-          selStartCol: sel?.startColumn,
-          selEndLine: sel?.endLineNumber,
-          selEndCol: sel?.endColumn,
-        })
-      })
-    }
-
-    // Render remote cursors
-    const renderCursors = () => {
-      if (!editor) return
-      const myId = provider.awareness.clientID
-      const decos = []
-      let css = ""
-
-      provider.awareness.getStates().forEach((state, clientId) => {
-        if (clientId === myId) return
-        if (!state.user?.username || !state.cursor) return
-
-        const name = state.user.username
-        const clr = state.user.color || getColorForUsername(name)
-        const c = state.cursor
-        const tag = `rc${clientId}`
-
-        css += `.${tag}{border-left:2px solid ${clr}!important;position:relative;}`
-        css += `.${tag}::after{content:"${name}";background:${clr};color:#fff;font-size:10px;font-weight:700;padding:1px 5px;border-radius:2px;position:absolute;top:-1.2em;left:2px;pointer-events:none;white-space:nowrap;z-index:10;}`
-
-        decos.push({
-          range: { startLineNumber: c.lineNumber, startColumn: c.column, endLineNumber: c.lineNumber, endColumn: c.column + 1 },
-          options: { className: tag, stickiness: 1 }
-        })
-
-        if (c.selStartLine && (c.selStartLine !== c.selEndLine || c.selStartCol !== c.selEndCol)) {
-          css += `.${tag}s{background:${clr}22!important;}`
-          decos.push({
-            range: { startLineNumber: c.selStartLine, startColumn: c.selStartCol, endLineNumber: c.selEndLine, endColumn: c.selEndCol },
-            options: { className: `${tag}s`, stickiness: 1 }
-          })
-        }
-      })
-
-      styleEl.textContent = css
-      decorationIds = editor.deltaDecorations(decorationIds, decos)
-    }
-
-    provider.awareness.on("change", renderCursors)
-    renderCursors()
-
     // --- Cleanup ---
     function handleBeforeUnload() {
       provider.awareness.setLocalStateField("user", null)
@@ -134,14 +131,11 @@ function Room() {
     window.addEventListener("beforeunload", handleBeforeUnload)
 
     return () => {
+      binding.destroy()
       provider.disconnect()
       window.removeEventListener("beforeunload", handleBeforeUnload)
-      if (cursorDisposable) cursorDisposable.dispose()
-      provider.awareness.off("change", renderCursors)
-      if (editor) editor.deltaDecorations(decorationIds, [])
-      styleEl.remove()
     }
-  }, [username, roomId, ydoc])
+  }, [username, roomId, ydoc, editorMounted])
 
   const handleJoin = (e) => {
     e.preventDefault()
@@ -256,39 +250,101 @@ function Room() {
       <div className="flex flex-1 gap-4 p-4 overflow-hidden">
         {/* Sidebar */}
         <aside className="w-56 bg-gray-900 rounded-lg p-4 flex flex-col gap-4 border border-gray-800">
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">
-            Active Users ({users.length})
-          </h2>
-          <ul className="space-y-2 overflow-y-auto">
-            {users.map((user, index) => (
-              <li
-                key={index}
-                className="flex items-center gap-2 px-3 py-2 bg-gray-800 text-white rounded-lg text-sm"
-              >
-                <span
-                  className="w-2 h-2 rounded-full flex-shrink-0"
-                  style={{ backgroundColor: user.color || "#22c55e" }}
-                ></span>
-                {user.username}
-                {user.username === username && (
-                  <span className="text-gray-500 text-xs ml-auto">(you)</span>
-                )}
-              </li>
-            ))}
-          </ul>
+          {/* Language Selector */}
+          <div>
+            <label className="text-sm font-semibold text-gray-400 uppercase tracking-wide block mb-2">
+              Language
+            </label>
+            <select
+              value={language}
+              onChange={handleLanguageChange}
+              className="w-full px-3 py-2 rounded-lg bg-gray-800 text-white text-sm
+                         border border-gray-700 focus:border-blue-500 focus:outline-none cursor-pointer"
+            >
+              {LANGUAGES.map((lang) => (
+                <option key={lang.id} value={lang.id}>
+                  {lang.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Run Button */}
+          <button
+            onClick={handleRun}
+            disabled={isRunning}
+            className={`w-full py-2.5 rounded-lg font-semibold text-sm transition-colors cursor-pointer
+              ${isRunning
+                ? "bg-gray-700 text-gray-400 cursor-not-allowed"
+                : "bg-green-600 hover:bg-green-500 text-white"
+              }`}
+          >
+            {isRunning ? "⟳ Running..." : "▶ Run Code"}
+          </button>
+
+          {/* Stdin Input */}
+          <div>
+            <label className="text-sm font-semibold text-gray-400 uppercase tracking-wide block mb-2">
+              Input (stdin)
+            </label>
+            <textarea
+              value={stdinValue}
+              onChange={(e) => setStdinValue(e.target.value)}
+              placeholder="Program input..."
+              rows={3}
+              className="w-full px-3 py-2 rounded-lg bg-gray-800 text-white text-sm font-mono
+                         border border-gray-700 focus:border-blue-500 focus:outline-none
+                         placeholder-gray-500 resize-none"
+            />
+          </div>
+
+          {/* Active Users */}
+          <div>
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">
+              Active Users ({users.length})
+            </h2>
+            <ul className="space-y-2 overflow-y-auto">
+              {users.map((user, index) => (
+                <li
+                  key={index}
+                  className="flex items-center gap-2 px-3 py-2 bg-gray-800 text-white rounded-lg text-sm"
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: user.color || "#22c55e" }}
+                  ></span>
+                  {user.username}
+                  {user.username === username && (
+                    <span className="text-gray-500 text-xs ml-auto">(you)</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         </aside>
 
-        {/* Editor */}
-        <section className="flex-1 bg-neutral-800 rounded-lg overflow-hidden border border-gray-800">
-          <Editor
-            padding={10}
-            height="100%"
-            defaultLanguage="javascript"
-            defaultValue="// Start coding here..."
-            theme="vs-dark"
-            onMount={handleEditorMount}
+        {/* Editor + Terminal */}
+        <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+          <section className="flex-1 bg-neutral-800 rounded-lg overflow-hidden border border-gray-800">
+            <Editor
+              padding={10}
+              height="100%"
+              defaultLanguage="javascript"
+              defaultValue="// Start coding here..."
+              theme="vs-dark"
+              onMount={handleEditorMount}
+            />
+          </section>
+
+          {/* Output Terminal */}
+          <OutputTerminal
+            output={output}
+            isRunning={isRunning}
+            exitCode={exitCode}
+            isOpen={terminalOpen}
+            onToggle={() => setTerminalOpen((prev) => !prev)}
           />
-        </section>
+        </div>
 
         {/* Chat Panel */}
         <ChatPanel

@@ -4,6 +4,15 @@ import {Server} from "socket.io"
 import {YSocketIO} from "y-socket.io/dist/server"
 import path from "path"
 import { fileURLToPath } from "url"
+import { rateLimit } from "express-rate-limit"
+import { executeCode, getSupportedLanguages } from "./services/codeRunner.js"
+
+// Rate limit for code execution: max 10 requests per minute per IP
+const executeRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { stdout: "", stderr: "Rate limit exceeded. Try again in a minute.", exitCode: 1 },
+})
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -31,6 +40,26 @@ app.get("/health",(req,res)=>{
     message: "Server is healthy",
     success: true
   })
+})
+
+// --- Code Execution API ---
+app.post("/api/execute", executeRateLimit, async (req, res) => {
+  const { language, code, stdin } = req.body
+
+  if (!language || !code) {
+    return res.status(400).json({
+      stdout: "",
+      stderr: "Missing 'language' or 'code' in request body",
+      exitCode: 1,
+    })
+  }
+
+  const result = await executeCode(language, code, stdin || "")
+  res.json(result)
+})
+
+app.get("/api/languages", (req, res) => {
+  res.json(getSupportedLanguages())
 })
 
 // Catch-all: serve index.html for any route not matched above

@@ -12,6 +12,10 @@ export default defineConfig({
         target: 'http://localhost:3000',
         ws: true,  // enable WebSocket proxying
       },
+      // Forward API requests to the backend server
+      '/api': {
+        target: 'http://localhost:3000',
+      },
     },
   },
 })
